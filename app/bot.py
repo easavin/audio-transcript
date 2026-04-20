@@ -4,10 +4,11 @@ import logging
 import tempfile
 from pathlib import Path
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -24,11 +25,83 @@ log = logging.getLogger(__name__)
 
 MODES = ("transcript", "short", "medium", "full")
 LANGS = ("auto", "ru", "en", "es")
+LANG_LABELS = {"auto": "🌐 Auto", "ru": "🇷🇺 Russian", "en": "🇬🇧 English", "es": "🇪🇸 Spanish"}
+MODE_LABELS = {
+    "transcript": "📝 Transcript",
+    "short": "⚡ Short",
+    "medium": "📋 Medium",
+    "full": "📖 Full",
+}
 MAX_TELEGRAM_MSG = 4000
 
 
+# ---------- Help / keyboards ----------
+
+def help_text(is_admin: bool) -> str:
+    lines = [
+        "🎙️ *Voice Transcript Bot*",
+        "",
+        "Forward me a voice or audio message and I'll transcribe or summarize it.",
+        "",
+        "*Modes:*",
+        "• 📝 *Transcript* — full text, no summary",
+        "• ⚡ *Short* — 1–2 sentence summary",
+        "• 📋 *Medium* — 3–5 bullet points",
+        "• 📖 *Full* — organized summary with all key details _(default)_",
+        "",
+        "*Language:*",
+        "• 🌐 *Auto* — summary in the same language as the message",
+        "• Or pick Russian / English / Spanish",
+        "",
+        "*Commands:*",
+        "/mode — pick output style",
+        "/lang — pick output language",
+        "/settings — show current settings",
+        "/help — this message",
+    ]
+    if is_admin:
+        lines += [
+            "",
+            "*Admin:*",
+            "/grant `<id>` — allow a user",
+            "/revoke `<id>` — remove access",
+            "/users — list allowed users",
+        ]
+    return "\n".join(lines)
+
+
+def _mode_keyboard(current: str) -> InlineKeyboardMarkup:
+    def label(m: str) -> str:
+        return ("✅ " if m == current else "") + MODE_LABELS[m]
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(label("transcript"), callback_data="m:transcript"),
+         InlineKeyboardButton(label("short"), callback_data="m:short")],
+        [InlineKeyboardButton(label("medium"), callback_data="m:medium"),
+         InlineKeyboardButton(label("full"), callback_data="m:full")],
+    ])
+
+
+def _lang_keyboard(current: str) -> InlineKeyboardMarkup:
+    def label(l: str) -> str:
+        return ("✅ " if l == current else "") + LANG_LABELS[l]
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(label("auto"), callback_data="l:auto"),
+         InlineKeyboardButton(label("ru"), callback_data="l:ru")],
+        [InlineKeyboardButton(label("en"), callback_data="l:en"),
+         InlineKeyboardButton(label("es"), callback_data="l:es")],
+    ])
+
+
+def _settings_shortcut_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("⚙️ Mode", callback_data="open:mode"),
+        InlineKeyboardButton("🌐 Language", callback_data="open:lang"),
+    ]])
+
+
+# ---------- Auth helpers ----------
+
 async def _resolve_user(update: Update) -> db.UserSettings | None:
-    """Upsert Telegram user into DB and return their settings (or None if no user)."""
     user = update.effective_user
     if not user:
         return None
@@ -39,11 +112,12 @@ async def _deny_and_show_id(update: Update) -> None:
     uid = update.effective_user.id if update.effective_user else 0
     await update.message.reply_text(
         "You are not authorized to use this bot yet.\n\n"
-        f"Forward this message to the admin:\n\n"
-        f"`/grant {uid}`",
+        f"Forward this message to the admin:\n\n`/grant {uid}`",
         parse_mode="Markdown",
     )
 
+
+# ---------- Commands ----------
 
 async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     s = await _resolve_user(update)
@@ -52,16 +126,26 @@ async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     if not s.allowed:
         await _deny_and_show_id(update)
         return
+    text = (
+        help_text(s.is_admin)
+        + f"\n\n_Current:_ {MODE_LABELS[s.default_mode]}  •  {LANG_LABELS[s.default_output_lang]}"
+    )
     await update.message.reply_text(
-        "Hi! Forward me a voice message and I'll transcribe or summarize it.\n\n"
-        f"Current mode: *{s.default_mode}*\n"
-        f"Output language: *{s.default_output_lang}*\n\n"
-        "Commands:\n"
-        "  /mode transcript|short|medium|full\n"
-        "  /lang auto|ru|en|es\n"
-        "  /settings"
-        + ("\n\nAdmin:\n  /grant <id>\n  /revoke <id>\n  /users" if s.is_admin else ""),
+        text,
         parse_mode="Markdown",
+        reply_markup=_settings_shortcut_keyboard(),
+    )
+
+
+async def cmd_help(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+    s = await _resolve_user(update)
+    if s is None or not s.allowed:
+        await _deny_and_show_id(update)
+        return
+    await update.message.reply_text(
+        help_text(s.is_admin),
+        parse_mode="Markdown",
+        reply_markup=_settings_shortcut_keyboard(),
     )
 
 
@@ -70,11 +154,13 @@ async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if s is None or not s.allowed:
         await _deny_and_show_id(update)
         return
-    if not context.args or context.args[0] not in MODES:
-        await update.message.reply_text(f"Usage: /mode {'|'.join(MODES)}")
+    if context.args and context.args[0] in MODES:
+        await db.update_mode(s.telegram_id, context.args[0])
+        await update.message.reply_text(f"Mode set to: {MODE_LABELS[context.args[0]]}")
         return
-    await db.update_mode(s.telegram_id, context.args[0])
-    await update.message.reply_text(f"Mode set to: {context.args[0]}")
+    await update.message.reply_text(
+        "Pick output style:", reply_markup=_mode_keyboard(s.default_mode)
+    )
 
 
 async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -82,13 +168,13 @@ async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if s is None or not s.allowed:
         await _deny_and_show_id(update)
         return
-    if not context.args or context.args[0] not in LANGS:
-        await update.message.reply_text(
-            f"Usage: /lang {'|'.join(LANGS)}\n'auto' keeps the transcript's original language."
-        )
+    if context.args and context.args[0] in LANGS:
+        await db.update_lang(s.telegram_id, context.args[0])
+        await update.message.reply_text(f"Language set to: {LANG_LABELS[context.args[0]]}")
         return
-    await db.update_lang(s.telegram_id, context.args[0])
-    await update.message.reply_text(f"Output language set to: {context.args[0]}")
+    await update.message.reply_text(
+        "Pick output language:", reply_markup=_lang_keyboard(s.default_output_lang)
+    )
 
 
 async def cmd_settings(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
@@ -97,10 +183,53 @@ async def cmd_settings(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         await _deny_and_show_id(update)
         return
     await update.message.reply_text(
-        f"Mode: *{s.default_mode}*\nLanguage: *{s.default_output_lang}*",
+        f"*Mode:* {MODE_LABELS[s.default_mode]}\n"
+        f"*Language:* {LANG_LABELS[s.default_output_lang]}",
         parse_mode="Markdown",
+        reply_markup=_settings_shortcut_keyboard(),
     )
 
+
+# ---------- Callback button handler ----------
+
+async def on_callback(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    s = await _resolve_user(update)
+    if s is None or not s.allowed:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+
+    data = query.data
+    await query.answer()
+
+    if data == "open:mode":
+        await query.edit_message_text(
+            "Pick output style:", reply_markup=_mode_keyboard(s.default_mode)
+        )
+        return
+    if data == "open:lang":
+        await query.edit_message_text(
+            "Pick output language:", reply_markup=_lang_keyboard(s.default_output_lang)
+        )
+        return
+
+    if data.startswith("m:"):
+        value = data[2:]
+        if value in MODES:
+            await db.update_mode(s.telegram_id, value)
+            await query.edit_message_text(f"Mode set to: {MODE_LABELS[value]}")
+        return
+    if data.startswith("l:"):
+        value = data[2:]
+        if value in LANGS:
+            await db.update_lang(s.telegram_id, value)
+            await query.edit_message_text(f"Language set to: {LANG_LABELS[value]}")
+        return
+
+
+# ---------- Admin commands ----------
 
 def _parse_id(args: list[str]) -> int | None:
     if not args:
@@ -120,7 +249,6 @@ async def cmd_grant(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if target is None:
         await update.message.reply_text("Usage: /grant <telegram_user_id>")
         return
-    # Ensure the target exists in DB even if they've never hit /start
     existed = await db.get_user(target) is not None
     if not existed:
         await db.upsert_user(target, None)
@@ -167,6 +295,8 @@ async def cmd_users(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     ]
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
+
+# ---------- Voice handler ----------
 
 async def _send_long(update: Update, text: str) -> None:
     for i in range(0, len(text), MAX_TELEGRAM_MSG):
@@ -226,11 +356,13 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 def build_application() -> Application:
     app = Application.builder().token(settings.telegram_bot_token).build()
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("mode", cmd_mode))
     app.add_handler(CommandHandler("lang", cmd_lang))
     app.add_handler(CommandHandler("settings", cmd_settings))
     app.add_handler(CommandHandler("grant", cmd_grant))
     app.add_handler(CommandHandler("revoke", cmd_revoke))
     app.add_handler(CommandHandler("users", cmd_users))
+    app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
     return app
