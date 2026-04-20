@@ -16,7 +16,7 @@ log = logging.getLogger("main")
 
 async def _post_init(_app) -> None:
     await db.init_pool()
-    log.info("DB pool ready. Allowed user IDs: %s", settings.allowed_ids or "<empty>")
+    log.info("DB pool ready. Admin IDs: %s", settings.admin_ids or "<empty>")
 
 
 async def _post_shutdown(_app) -> None:

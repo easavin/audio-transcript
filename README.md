@@ -27,7 +27,7 @@ pip install -e .
 python -m app.main
 ```
 
-Send `/start` to your bot. It will reply *"Not authorized. Your Telegram ID is: 12345"*. Copy that ID into `ALLOWED_USER_IDS=12345` in `.env` and restart.
+Send `/start` to your bot. It will reply with a copy-paste grant command containing your Telegram ID. Copy the ID into `ADMIN_USER_IDS=12345` in `.env` and restart — you're now admin. From then on, add new users at runtime with `/grant <id>` — no redeploy needed.
 
 ## Deploy to Railway
 
@@ -35,7 +35,7 @@ Send `/start` to your bot. It will reply *"Not authorized. Your Telegram ID is: 
 2. Railway → **New Project → Deploy from GitHub**. Select this repo.
 3. Add env vars in Railway's UI:
    - `TELEGRAM_BOT_TOKEN`
-   - `ALLOWED_USER_IDS` (your Telegram user ID, comma-separated)
+   - `ADMIN_USER_IDS` (your Telegram user ID, comma-separated)
    - `DATABASE_URL` (Neon connection string)
    - `GROQ_API_KEY`
    - `GEMINI_API_KEY`
@@ -67,16 +67,20 @@ Local Whisper provider is stubbed in [app/providers/stt.py](app/providers/stt.py
 
 ## Bot commands
 
-- `/start` — onboard / show current settings (also prints your Telegram ID if unauthorized)
+- `/start` — onboard / show current settings (unauthorized users get a copy-paste `/grant <id>` command to forward to an admin)
 - `/mode transcript|short|medium|full` — default `full`
 - `/lang auto|ru|en|es` — `auto` = summary in same language as transcript
 - `/settings` — show current settings
 - Forward or send a voice/audio message — apply settings, reply with result
 
+**Admin-only:**
+- `/grant <telegram_user_id>` — allow a user
+- `/revoke <telegram_user_id>` — remove access (admins cannot be revoked this way)
+- `/users` — list all allowed users
+
 ## Roadmap
 
-- **Phase 1 (done)**: Telegram, solo user via `ALLOWED_USER_IDS`, Groq + Gemini.
+- **Phase 1 (done)**: Telegram, admin + runtime allowlist via `/grant`, Groq + Gemini.
 - **Phase 1.5**: Local Whisper + Gemma 3 via Ollama on Mac Mini.
-- **Phase 2**: Admin commands to add/remove users from DB at runtime.
-- **Phase 3**: WhatsApp — blocked on Business API (requires registered business entity).
-- **Phase 4**: Voice-to-voice translation (TTS on top of translated summary).
+- **Phase 2**: WhatsApp — blocked on Business API (requires registered business entity).
+- **Phase 3**: Voice-to-voice translation (TTS on top of translated summary).

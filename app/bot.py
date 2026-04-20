@@ -24,31 +24,34 @@ log = logging.getLogger(__name__)
 
 MODES = ("transcript", "short", "medium", "full")
 LANGS = ("auto", "ru", "en", "es")
-MAX_TELEGRAM_MSG = 4000  # safety under 4096
+MAX_TELEGRAM_MSG = 4000
 
 
-def _is_authorized(user_id: int) -> bool:
-    return user_id in settings.allowed_ids
+async def _resolve_user(update: Update) -> db.UserSettings | None:
+    """Upsert Telegram user into DB and return their settings (or None if no user)."""
+    user = update.effective_user
+    if not user:
+        return None
+    return await db.upsert_user(user.id, user.username)
 
 
-async def _deny(update: Update) -> None:
-    uid = update.effective_user.id if update.effective_user else "unknown"
+async def _deny_and_show_id(update: Update) -> None:
+    uid = update.effective_user.id if update.effective_user else 0
     await update.message.reply_text(
-        f"You are not authorized to use this bot.\n"
-        f"Your Telegram ID is: `{uid}`\n"
-        f"Ask the admin to add it to ALLOWED_USER_IDS.",
+        "You are not authorized to use this bot yet.\n\n"
+        f"Forward this message to the admin:\n\n"
+        f"`/grant {uid}`",
         parse_mode="Markdown",
     )
 
 
 async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    if not user:
+    s = await _resolve_user(update)
+    if s is None:
         return
-    if not _is_authorized(user.id):
-        await _deny(update)
+    if not s.allowed:
+        await _deny_and_show_id(update)
         return
-    s = await db.get_or_create_user(user.id, user.username)
     await update.message.reply_text(
         "Hi! Forward me a voice message and I'll transcribe or summarize it.\n\n"
         f"Current mode: *{s.default_mode}*\n"
@@ -56,48 +59,113 @@ async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         "Commands:\n"
         "  /mode transcript|short|medium|full\n"
         "  /lang auto|ru|en|es\n"
-        "  /settings",
+        "  /settings"
+        + ("\n\nAdmin:\n  /grant <id>\n  /revoke <id>\n  /users" if s.is_admin else ""),
         parse_mode="Markdown",
     )
 
 
 async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    if not user or not _is_authorized(user.id):
-        await _deny(update)
+    s = await _resolve_user(update)
+    if s is None or not s.allowed:
+        await _deny_and_show_id(update)
         return
     if not context.args or context.args[0] not in MODES:
         await update.message.reply_text(f"Usage: /mode {'|'.join(MODES)}")
         return
-    await db.update_mode(user.id, context.args[0])
+    await db.update_mode(s.telegram_id, context.args[0])
     await update.message.reply_text(f"Mode set to: {context.args[0]}")
 
 
 async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    if not user or not _is_authorized(user.id):
-        await _deny(update)
+    s = await _resolve_user(update)
+    if s is None or not s.allowed:
+        await _deny_and_show_id(update)
         return
     if not context.args or context.args[0] not in LANGS:
         await update.message.reply_text(
-            f"Usage: /lang {'|'.join(LANGS)}\n"
-            "'auto' keeps the original language of the message."
+            f"Usage: /lang {'|'.join(LANGS)}\n'auto' keeps the transcript's original language."
         )
         return
-    await db.update_lang(user.id, context.args[0])
+    await db.update_lang(s.telegram_id, context.args[0])
     await update.message.reply_text(f"Output language set to: {context.args[0]}")
 
 
 async def cmd_settings(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    if not user or not _is_authorized(user.id):
-        await _deny(update)
+    s = await _resolve_user(update)
+    if s is None or not s.allowed:
+        await _deny_and_show_id(update)
         return
-    s = await db.get_or_create_user(user.id, user.username)
     await update.message.reply_text(
         f"Mode: *{s.default_mode}*\nLanguage: *{s.default_output_lang}*",
         parse_mode="Markdown",
     )
+
+
+def _parse_id(args: list[str]) -> int | None:
+    if not args:
+        return None
+    try:
+        return int(args[0])
+    except ValueError:
+        return None
+
+
+async def cmd_grant(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    s = await _resolve_user(update)
+    if s is None or not s.is_admin:
+        await update.message.reply_text("Admin only.")
+        return
+    target = _parse_id(context.args or [])
+    if target is None:
+        await update.message.reply_text("Usage: /grant <telegram_user_id>")
+        return
+    # Ensure the target exists in DB even if they've never hit /start
+    existed = await db.get_user(target) is not None
+    if not existed:
+        await db.upsert_user(target, None)
+    ok = await db.grant(target)
+    if ok:
+        await update.message.reply_text(
+            f"Granted access to {target}." + ("" if existed else " (They haven't opened the bot yet.)")
+        )
+    else:
+        await update.message.reply_text(f"Could not grant {target}.")
+
+
+async def cmd_revoke(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    s = await _resolve_user(update)
+    if s is None or not s.is_admin:
+        await update.message.reply_text("Admin only.")
+        return
+    target = _parse_id(context.args or [])
+    if target is None:
+        await update.message.reply_text("Usage: /revoke <telegram_user_id>")
+        return
+    ok = await db.revoke(target)
+    if ok:
+        await update.message.reply_text(f"Revoked access from {target}.")
+    else:
+        await update.message.reply_text(
+            f"{target} was not a regular allowed user (admins cannot be revoked this way)."
+        )
+
+
+async def cmd_users(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+    s = await _resolve_user(update)
+    if s is None or not s.is_admin:
+        await update.message.reply_text("Admin only.")
+        return
+    users = await db.list_allowed()
+    if not users:
+        await update.message.reply_text("No allowed users.")
+        return
+    lines = [
+        f"{'⭐' if u.is_admin else '•'} `{u.telegram_id}`"
+        + (f" @{u.username}" if u.username else "")
+        for u in users
+    ]
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def _send_long(update: Update, text: str) -> None:
@@ -106,12 +174,12 @@ async def _send_long(update: Update, text: str) -> None:
 
 
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
+    s = await _resolve_user(update)
     msg = update.message
-    if not user or not msg:
+    if s is None or not msg:
         return
-    if not _is_authorized(user.id):
-        await _deny(update)
+    if not s.allowed:
+        await _deny_and_show_id(update)
         return
 
     voice = msg.voice or msg.audio
@@ -119,7 +187,6 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await msg.reply_text("Please send a voice or audio message.")
         return
 
-    s = await db.get_or_create_user(user.id, user.username)
     await context.bot.send_chat_action(msg.chat_id, ChatAction.TYPING)
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -162,5 +229,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("mode", cmd_mode))
     app.add_handler(CommandHandler("lang", cmd_lang))
     app.add_handler(CommandHandler("settings", cmd_settings))
+    app.add_handler(CommandHandler("grant", cmd_grant))
+    app.add_handler(CommandHandler("revoke", cmd_revoke))
+    app.add_handler(CommandHandler("users", cmd_users))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
     return app

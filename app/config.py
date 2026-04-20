@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     telegram_bot_token: str
-    allowed_user_ids: str = ""
+    admin_user_ids: str = ""
 
     database_url: str
 
@@ -27,8 +27,8 @@ class Settings(BaseSettings):
     port: int = 8080
 
     @property
-    def allowed_ids(self) -> set[int]:
-        return {int(x.strip()) for x in self.allowed_user_ids.split(",") if x.strip()}
+    def admin_ids(self) -> set[int]:
+        return {int(x.strip()) for x in self.admin_user_ids.split(",") if x.strip()}
 
     @property
     def use_webhook(self) -> bool:
