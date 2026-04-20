@@ -24,7 +24,7 @@ from telegram.ext import (
 
 from app import db
 from app.config import settings
-from app.prompts import build_summary_prompt
+from app.prompts import build_summary_prompt, build_translation_prompt
 from app.providers.llm import get_llm_provider
 from app.providers.stt import get_stt_provider
 
@@ -51,14 +51,14 @@ def help_text(is_admin: bool) -> str:
         "Forward me a voice or audio message and I'll transcribe or summarize it.",
         "",
         "*Modes:*",
-        "• 📝 *Transcript* — full text, no summary",
+        "• 📝 *Transcript* — full text (translated if you pick a language)",
         "• ⚡ *Short* — 1–2 sentence summary",
         "• 📋 *Medium* — 3–5 bullet points",
         "• 📖 *Full* — organized summary with all key details _(default)_",
         "",
         "*Language:*",
-        "• 🌐 *Auto* — summary in the same language as the message",
-        "• Or pick Russian / English / Spanish",
+        "• 🌐 *Auto* — keep the original language of the message",
+        "• Or pick Russian / English / Spanish — the output is translated into it",
         "",
         "*Commands:*",
         "/mode — pick output style",
@@ -343,7 +343,21 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if s.default_mode == "transcript":
-        await _send_long(update, transcript)
+        # Raw transcript when language is 'auto', otherwise full translation.
+        if s.default_output_lang == "auto":
+            await _send_long(update, transcript)
+            return
+        await context.bot.send_chat_action(msg.chat_id, ChatAction.TYPING)
+        prompt = build_translation_prompt(transcript, s.default_output_lang)
+        try:
+            translated = await get_llm_provider().summarize(prompt)
+        except Exception:
+            log.exception("Translation failed")
+            await msg.reply_text(
+                "Translation failed, but here is the original transcript:\n\n" + transcript[:3500]
+            )
+            return
+        await _send_long(update, translated)
         return
 
     await context.bot.send_chat_action(msg.chat_id, ChatAction.TYPING)
