@@ -4,7 +4,14 @@ import logging
 import tempfile
 from pathlib import Path
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    BotCommand,
+    BotCommandScopeChat,
+    BotCommandScopeDefault,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
@@ -351,6 +358,33 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await _send_long(update, summary)
+
+
+USER_COMMANDS = [
+    BotCommand("start", "Welcome + how it works"),
+    BotCommand("help", "Show help"),
+    BotCommand("mode", "Pick output style"),
+    BotCommand("lang", "Pick output language"),
+    BotCommand("settings", "Show current settings"),
+]
+
+ADMIN_COMMANDS = USER_COMMANDS + [
+    BotCommand("grant", "Allow a user"),
+    BotCommand("revoke", "Remove a user"),
+    BotCommand("users", "List allowed users"),
+]
+
+
+async def register_commands(app: Application) -> None:
+    """Publish commands to Telegram so they show in the / autocomplete menu."""
+    await app.bot.set_my_commands(USER_COMMANDS, scope=BotCommandScopeDefault())
+    for admin_id in settings.admin_ids:
+        try:
+            await app.bot.set_my_commands(
+                ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=admin_id)
+            )
+        except Exception:
+            log.exception("Failed to set admin commands for %s", admin_id)
 
 
 def build_application() -> Application:

@@ -4,7 +4,7 @@ import asyncio
 import logging
 
 from app import db
-from app.bot import build_application
+from app.bot import build_application, register_commands
 from app.config import settings
 
 logging.basicConfig(
@@ -14,9 +14,11 @@ logging.basicConfig(
 log = logging.getLogger("main")
 
 
-async def _post_init(_app) -> None:
+async def _post_init(app) -> None:
     await db.init_pool()
     log.info("DB pool ready. Admin IDs: %s", settings.admin_ids or "<empty>")
+    await register_commands(app)
+    log.info("Telegram commands registered")
 
 
 async def _post_shutdown(_app) -> None:
