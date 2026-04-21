@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from telegram import (
@@ -40,6 +42,7 @@ MODE_LABELS = {
     "full": "📖 Full",
 }
 MAX_TELEGRAM_MSG = 4000
+BATCH_WINDOW_SECONDS = 3.0
 
 
 # ---------- Help / keyboards ----------
@@ -59,6 +62,8 @@ def help_text(is_admin: bool) -> str:
         "*Language:*",
         "• 🌐 *Auto* — keep the original language of the message",
         "• Or pick Russian / English / Spanish — the output is translated into it",
+        "",
+        "_Tip: send several voices in a row and I'll combine them into one summary._",
         "",
         "*Commands:*",
         "/mode — pick output style",
@@ -310,6 +315,87 @@ async def _send_long(update: Update, text: str) -> None:
         await update.message.reply_text(text[i : i + MAX_TELEGRAM_MSG])
 
 
+# ---------- Batch handling ----------
+# When several voices arrive within BATCH_WINDOW_SECONDS of each other they are
+# combined into a single summary. Keyed by chat_id (one user = one private chat).
+
+@dataclass
+class _PendingBatch:
+    settings: db.UserSettings
+    transcripts: list[str] = field(default_factory=list)
+    last_update: Update | None = None
+    flush_task: asyncio.Task | None = None
+
+
+_batches: dict[int, _PendingBatch] = {}
+
+
+async def _flush_batch_after(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        await asyncio.sleep(BATCH_WINDOW_SECONDS)
+    except asyncio.CancelledError:
+        return
+
+    batch = _batches.get(chat_id)
+    if batch is None:
+        return
+    # Only proceed if we're still the active flush task (no newer voice arrived)
+    if batch.flush_task is not asyncio.current_task():
+        return
+    _batches.pop(chat_id, None)
+
+    if batch.last_update is None or not batch.transcripts:
+        return
+
+    if len(batch.transcripts) == 1:
+        combined = batch.transcripts[0]
+    else:
+        combined = "\n\n".join(batch.transcripts)
+
+    await _respond_with(batch.last_update, context, batch.settings, combined)
+
+
+async def _respond_with(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    s: db.UserSettings,
+    transcript: str,
+) -> None:
+    msg = update.message
+    if msg is None:
+        return
+
+    if s.default_mode == "transcript":
+        if s.default_output_lang == "auto":
+            await _send_long(update, transcript)
+            return
+        await context.bot.send_chat_action(msg.chat_id, ChatAction.TYPING)
+        prompt = build_translation_prompt(transcript, s.default_output_lang)
+        try:
+            translated = await get_llm_provider().summarize(prompt)
+        except Exception:
+            log.exception("Translation failed")
+            await msg.reply_text(
+                "Translation failed, but here is the original transcript:\n\n" + transcript[:3500]
+            )
+            return
+        await _send_long(update, translated)
+        return
+
+    await context.bot.send_chat_action(msg.chat_id, ChatAction.TYPING)
+    prompt = build_summary_prompt(transcript, s.default_mode, s.default_output_lang)
+    try:
+        summary = await get_llm_provider().summarize(prompt)
+    except Exception:
+        log.exception("LLM failed")
+        await msg.reply_text(
+            "Summary failed, but here is the raw transcript:\n\n" + transcript[:3500]
+        )
+        return
+
+    await _send_long(update, summary)
+
+
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     s = await _resolve_user(update)
     msg = update.message
@@ -342,36 +428,20 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await msg.reply_text("I couldn't detect any speech in that message.")
         return
 
-    if s.default_mode == "transcript":
-        # Raw transcript when language is 'auto', otherwise full translation.
-        if s.default_output_lang == "auto":
-            await _send_long(update, transcript)
-            return
-        await context.bot.send_chat_action(msg.chat_id, ChatAction.TYPING)
-        prompt = build_translation_prompt(transcript, s.default_output_lang)
-        try:
-            translated = await get_llm_provider().summarize(prompt)
-        except Exception:
-            log.exception("Translation failed")
-            await msg.reply_text(
-                "Translation failed, but here is the original transcript:\n\n" + transcript[:3500]
-            )
-            return
-        await _send_long(update, translated)
-        return
+    # Append to the per-chat batch and (re)schedule the flush.
+    chat_id = msg.chat_id
+    batch = _batches.get(chat_id)
+    if batch is None:
+        batch = _PendingBatch(settings=s)
+        _batches[chat_id] = batch
 
-    await context.bot.send_chat_action(msg.chat_id, ChatAction.TYPING)
-    prompt = build_summary_prompt(transcript, s.default_mode, s.default_output_lang)
-    try:
-        summary = await get_llm_provider().summarize(prompt)
-    except Exception:
-        log.exception("LLM failed")
-        await msg.reply_text(
-            "Summary failed, but here is the raw transcript:\n\n" + transcript[:3500]
-        )
-        return
+    batch.transcripts.append(transcript)
+    batch.last_update = update
+    batch.settings = s  # user may have changed /mode or /lang between voices
 
-    await _send_long(update, summary)
+    if batch.flush_task and not batch.flush_task.done():
+        batch.flush_task.cancel()
+    batch.flush_task = asyncio.create_task(_flush_batch_after(chat_id, context))
 
 
 USER_COMMANDS = [
