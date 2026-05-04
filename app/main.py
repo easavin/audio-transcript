@@ -2,15 +2,40 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 
 from app import db
 from app.bot import build_application, register_commands
 from app.config import settings
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
+
+def _configure_logging() -> None:
+    """INFO/DEBUG → stdout, WARNING+ → stderr.
+
+    Railway colors anything on stderr red, so routing benign info to stdout
+    keeps the dashboard readable.
+    """
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setLevel(logging.DEBUG)
+    stdout_handler.addFilter(lambda r: r.levelno < logging.WARNING)
+    stdout_handler.setFormatter(fmt)
+
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setLevel(logging.WARNING)
+    stderr_handler.setFormatter(fmt)
+
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.handlers = [stdout_handler, stderr_handler]
+
+    # Quiet noisy libraries — only surface their warnings/errors.
+    for name in ("httpx", "httpcore", "google_genai", "telegram.ext.Updater"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
+_configure_logging()
 log = logging.getLogger("main")
 
 
