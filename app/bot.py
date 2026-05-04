@@ -26,7 +26,11 @@ from telegram.ext import (
 
 from app import db
 from app.config import settings
-from app.prompts import build_summary_prompt, build_translation_prompt
+from app.prompts import (
+    build_error_explanation_prompt,
+    build_summary_prompt,
+    build_translation_prompt,
+)
 from app.providers.llm import get_llm_provider
 from app.providers.stt import get_stt_provider
 
@@ -444,6 +448,38 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     batch.flush_task = asyncio.create_task(_flush_batch_after(chat_id, context))
 
 
+# ---------- Global error handler ----------
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    err = context.error
+    log.exception("Unhandled exception in handler", exc_info=err)
+
+    if not isinstance(update, Update) or update.effective_message is None:
+        return
+
+    lang_hint = (
+        update.effective_user.language_code
+        if update.effective_user and update.effective_user.language_code
+        else "en"
+    )
+    error_text = f"{type(err).__name__}: {err}" if err else "Unknown error"
+
+    explanation: str | None = None
+    try:
+        prompt = build_error_explanation_prompt(error_text, lang_hint)
+        explanation = await get_llm_provider().summarize(prompt)
+    except Exception:
+        log.exception("LLM-based error explanation failed")
+
+    if not explanation:
+        explanation = "Something went wrong on my side. Please try again in a moment."
+
+    try:
+        await update.effective_message.reply_text(explanation)
+    except Exception:
+        log.exception("Failed to deliver error explanation to user")
+
+
 USER_COMMANDS = [
     BotCommand("start", "Welcome + how it works"),
     BotCommand("help", "Show help"),
@@ -483,4 +519,5 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("users", cmd_users))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
+    app.add_error_handler(on_error)
     return app

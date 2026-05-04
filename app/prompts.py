@@ -47,6 +47,23 @@ def build_summary_prompt(transcript: str, mode: str, target_lang: str) -> str:
     )
 
 
+def build_error_explanation_prompt(error_text: str, user_lang_hint: str) -> str:
+    return (
+        "You are the error voice of a Telegram voice-transcription bot. "
+        "An exception was raised while handling a user's request. "
+        "Turn this technical error into a brief, friendly note for the user.\n"
+        "- 1-2 sentences maximum, plain text only, no markdown, no asterisks.\n"
+        "- If the cause is identifiable (network timeout, Telegram CDN issue, file too "
+        "large, API quota or auth error, unsupported format, etc.), say so plainly.\n"
+        "- Suggest the most useful next step (retry, send a shorter clip, wait a moment).\n"
+        "- Do NOT apologize at length, do NOT include the raw exception text or stack "
+        "trace, do NOT mention internal code, files, or providers by name.\n"
+        f"- Reply in the user's language. Their Telegram language code is '{user_lang_hint}'. "
+        "Common codes: en=English, ru=Russian, es=Spanish. If unsure, reply in English.\n\n"
+        f"Technical error:\n{error_text}"
+    )
+
+
 def build_translation_prompt(transcript: str, target_lang: str) -> str:
     lang_name = LANG_NAMES[target_lang]
     return (
