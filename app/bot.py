@@ -15,6 +15,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ChatAction
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -400,6 +401,37 @@ async def _respond_with(
     await _send_long(update, summary)
 
 
+_DOWNLOAD_ATTEMPTS = 3
+
+
+async def _download_voice(
+    context: ContextTypes.DEFAULT_TYPE, file_id: str, path: Path
+) -> None:
+    """Fetch a voice/audio file from Telegram's CDN with a few bounded retries.
+
+    The CDN occasionally stalls; a single attempt under a tight timeout is the
+    main source of the 'it took too long' errors users were seeing.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
+        try:
+            tg_file = await context.bot.get_file(file_id)
+            await tg_file.download_to_drive(path)
+            return
+        except (TimedOut, NetworkError) as exc:
+            last_exc = exc
+            log.warning(
+                "Telegram download attempt %d/%d failed: %s",
+                attempt,
+                _DOWNLOAD_ATTEMPTS,
+                exc,
+            )
+            if attempt < _DOWNLOAD_ATTEMPTS:
+                await asyncio.sleep(1.0 * attempt)
+    assert last_exc is not None
+    raise last_exc
+
+
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     s = await _resolve_user(update)
     msg = update.message
@@ -418,8 +450,14 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / f"audio-{voice.file_unique_id}.ogg"
-        tg_file = await context.bot.get_file(voice.file_id)
-        await tg_file.download_to_drive(path)
+        try:
+            await _download_voice(context, voice.file_id, path)
+        except (TimedOut, NetworkError):
+            log.exception("Telegram download failed")
+            await msg.reply_text(
+                "I couldn't fetch that audio from Telegram. Please try sending it again."
+            )
+            return
 
         try:
             transcript = await get_stt_provider().transcribe(path)
@@ -508,7 +546,16 @@ async def register_commands(app: Application) -> None:
 
 
 def build_application() -> Application:
-    app = Application.builder().token(settings.telegram_bot_token).build()
+    app = (
+        Application.builder()
+        .token(settings.telegram_bot_token)
+        .connect_timeout(settings.telegram_connect_timeout)
+        .read_timeout(settings.telegram_read_timeout)
+        .write_timeout(settings.telegram_write_timeout)
+        .media_write_timeout(settings.telegram_write_timeout)
+        .pool_timeout(settings.telegram_pool_timeout)
+        .build()
+    )
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("mode", cmd_mode))

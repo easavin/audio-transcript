@@ -26,6 +26,15 @@ class Settings(BaseSettings):
     telegram_webhook_secret: str = ""
     port: int = 8080
 
+    # Network timeouts (seconds). Telegram's library defaults (5s read / 1s pool)
+    # are too tight for downloading voice files from the CDN over Railway egress.
+    telegram_connect_timeout: float = 15.0
+    telegram_read_timeout: float = 60.0
+    telegram_write_timeout: float = 60.0
+    telegram_pool_timeout: float = 10.0
+    # How long to wait on the Groq transcription HTTP call before giving up.
+    stt_timeout: float = 120.0
+
     @property
     def admin_ids(self) -> set[int]:
         return {int(x.strip()) for x in self.admin_user_ids.split(",") if x.strip()}
