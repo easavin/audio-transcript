@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import sys
 
-from app import db
-from app.bot import build_application, register_commands
+import uvicorn
+
 from app.config import settings
 
 
@@ -39,36 +38,19 @@ _configure_logging()
 log = logging.getLogger("main")
 
 
-async def _post_init(app) -> None:
-    await db.init_pool()
-    log.info("DB pool ready. Admin IDs: %s", settings.admin_ids or "<empty>")
-    await register_commands(app)
-    log.info("Telegram commands registered")
-
-
-async def _post_shutdown(_app) -> None:
-    await db.close_pool()
-
-
 def main() -> None:
-    app = build_application()
-    app.post_init = _post_init
-    app.post_shutdown = _post_shutdown
+    mode = "WEBHOOK" if settings.use_webhook else "POLLING (Telegram)"
+    log.info("Starting server on port %s — Telegram mode: %s", settings.port, mode)
+    # Import inside main so logging is configured before the app module loads.
+    from app.server import app
 
-    if settings.use_webhook:
-        url = f"{settings.telegram_webhook_base.rstrip('/')}/{settings.telegram_webhook_secret}"
-        log.info("Starting in WEBHOOK mode at %s", url)
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=settings.port,
-            url_path=settings.telegram_webhook_secret,
-            webhook_url=url,
-            secret_token=settings.telegram_webhook_secret,
-            allowed_updates=["message"],
-        )
-    else:
-        log.info("Starting in POLLING mode")
-        app.run_polling(allowed_updates=["message"])
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=settings.port,
+        log_level="info",
+        access_log=False,
+    )
 
 
 if __name__ == "__main__":
@@ -79,9 +61,3 @@ if __name__ == "__main__":
     except Exception:
         log.exception("Fatal error")
         raise
-    finally:
-        # run_webhook/run_polling handle their own loop; ensure any stray tasks finalize
-        try:
-            asyncio.get_event_loop().close()
-        except Exception:
-            pass

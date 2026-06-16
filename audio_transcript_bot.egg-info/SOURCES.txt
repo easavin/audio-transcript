@@ -3,12 +3,16 @@ pyproject.toml
 app/__init__.py
 app/bot.py
 app/config.py
+app/core.py
 app/db.py
 app/main.py
 app/prompts.py
+app/server.py
+app/whatsapp_handler.py
 app/providers/__init__.py
 app/providers/llm.py
 app/providers/stt.py
+app/providers/whatsapp.py
 audio_transcript_bot.egg-info/PKG-INFO
 audio_transcript_bot.egg-info/SOURCES.txt
 audio_transcript_bot.egg-info/dependency_links.txt

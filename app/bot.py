@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import tempfile
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from telegram import (
@@ -27,27 +26,21 @@ from telegram.ext import (
 
 from app import db
 from app.config import settings
-from app.prompts import (
-    build_error_explanation_prompt,
-    build_summary_prompt,
-    build_translation_prompt,
+from app.core import (
+    LANG_LABELS,
+    LANGS,
+    MODE_LABELS,
+    MODES,
+    Batcher,
+    chunk,
+    transcript_to_reply,
 )
+from app.prompts import build_error_explanation_prompt
 from app.providers.llm import get_llm_provider
-from app.providers.stt import get_stt_provider
 
 log = logging.getLogger(__name__)
 
-MODES = ("transcript", "short", "medium", "full")
-LANGS = ("auto", "ru", "en", "es")
-LANG_LABELS = {"auto": "🌐 Auto", "ru": "🇷🇺 Russian", "en": "🇬🇧 English", "es": "🇪🇸 Spanish"}
-MODE_LABELS = {
-    "transcript": "📝 Transcript",
-    "short": "⚡ Short",
-    "medium": "📋 Medium",
-    "full": "📖 Full",
-}
-MAX_TELEGRAM_MSG = 4000
-BATCH_WINDOW_SECONDS = 3.0
+PLATFORM = "telegram"
 
 
 # ---------- Help / keyboards ----------
@@ -122,7 +115,7 @@ async def _resolve_user(update: Update) -> db.UserSettings | None:
     user = update.effective_user
     if not user:
         return None
-    return await db.upsert_user(user.id, user.username)
+    return await db.upsert_user(PLATFORM, str(user.id), user.username)
 
 
 async def _deny_and_show_id(update: Update) -> None:
@@ -172,7 +165,7 @@ async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _deny_and_show_id(update)
         return
     if context.args and context.args[0] in MODES:
-        await db.update_mode(s.telegram_id, context.args[0])
+        await db.update_mode(PLATFORM, s.external_id, context.args[0])
         await update.message.reply_text(f"Mode set to: {MODE_LABELS[context.args[0]]}")
         return
     await update.message.reply_text(
@@ -186,7 +179,7 @@ async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _deny_and_show_id(update)
         return
     if context.args and context.args[0] in LANGS:
-        await db.update_lang(s.telegram_id, context.args[0])
+        await db.update_lang(PLATFORM, s.external_id, context.args[0])
         await update.message.reply_text(f"Language set to: {LANG_LABELS[context.args[0]]}")
         return
     await update.message.reply_text(
@@ -235,13 +228,13 @@ async def on_callback(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     if data.startswith("m:"):
         value = data[2:]
         if value in MODES:
-            await db.update_mode(s.telegram_id, value)
+            await db.update_mode(PLATFORM, s.external_id, value)
             await query.edit_message_text(f"Mode set to: {MODE_LABELS[value]}")
         return
     if data.startswith("l:"):
         value = data[2:]
         if value in LANGS:
-            await db.update_lang(s.telegram_id, value)
+            await db.update_lang(PLATFORM, s.external_id, value)
             await query.edit_message_text(f"Language set to: {LANG_LABELS[value]}")
         return
 
@@ -266,10 +259,10 @@ async def cmd_grant(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if target is None:
         await update.message.reply_text("Usage: /grant <telegram_user_id>")
         return
-    existed = await db.get_user(target) is not None
+    existed = await db.get_user(PLATFORM, str(target)) is not None
     if not existed:
-        await db.upsert_user(target, None)
-    ok = await db.grant(target)
+        await db.upsert_user(PLATFORM, str(target), None)
+    ok = await db.grant(PLATFORM, str(target))
     if ok:
         await update.message.reply_text(
             f"Granted access to {target}." + ("" if existed else " (They haven't opened the bot yet.)")
@@ -287,7 +280,7 @@ async def cmd_revoke(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if target is None:
         await update.message.reply_text("Usage: /revoke <telegram_user_id>")
         return
-    ok = await db.revoke(target)
+    ok = await db.revoke(PLATFORM, str(target))
     if ok:
         await update.message.reply_text(f"Revoked access from {target}.")
     else:
@@ -301,12 +294,12 @@ async def cmd_users(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     if s is None or not s.is_admin:
         await update.message.reply_text("Admin only.")
         return
-    users = await db.list_allowed()
+    users = await db.list_allowed(PLATFORM)
     if not users:
         await update.message.reply_text("No allowed users.")
         return
     lines = [
-        f"{'⭐' if u.is_admin else '•'} `{u.telegram_id}`"
+        f"{'⭐' if u.is_admin else '•'} `{u.external_id}`"
         + (f" @{u.username}" if u.username else "")
         for u in users
     ]
@@ -316,89 +309,33 @@ async def cmd_users(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 # ---------- Voice handler ----------
 
 async def _send_long(update: Update, text: str) -> None:
-    for i in range(0, len(text), MAX_TELEGRAM_MSG):
-        await update.message.reply_text(text[i : i + MAX_TELEGRAM_MSG])
+    for part in chunk(text):
+        await update.message.reply_text(part)
 
 
-# ---------- Batch handling ----------
-# When several voices arrive within BATCH_WINDOW_SECONDS of each other they are
-# combined into a single summary. Keyed by chat_id (one user = one private chat).
-
-@dataclass
-class _PendingBatch:
-    settings: db.UserSettings
-    transcripts: list[str] = field(default_factory=list)
-    last_update: Update | None = None
-    flush_task: asyncio.Task | None = None
-
-
-_batches: dict[int, _PendingBatch] = {}
-
-
-async def _flush_batch_after(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    try:
-        await asyncio.sleep(BATCH_WINDOW_SECONDS)
-    except asyncio.CancelledError:
-        return
-
-    batch = _batches.get(chat_id)
-    if batch is None:
-        return
-    # Only proceed if we're still the active flush task (no newer voice arrived)
-    if batch.flush_task is not asyncio.current_task():
-        return
-    _batches.pop(chat_id, None)
-
-    if batch.last_update is None or not batch.transcripts:
-        return
-
-    if len(batch.transcripts) == 1:
-        combined = batch.transcripts[0]
-    else:
-        combined = "\n\n".join(batch.transcripts)
-
-    await _respond_with(batch.last_update, context, batch.settings, combined)
-
-
-async def _respond_with(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+async def _flush_telegram(
+    payload: tuple[Update, ContextTypes.DEFAULT_TYPE],
     s: db.UserSettings,
-    transcript: str,
+    combined: str,
 ) -> None:
+    update, context = payload
     msg = update.message
     if msg is None:
         return
-
-    if s.default_mode == "transcript":
-        if s.default_output_lang == "auto":
-            await _send_long(update, transcript)
-            return
-        await context.bot.send_chat_action(msg.chat_id, ChatAction.TYPING)
-        prompt = build_translation_prompt(transcript, s.default_output_lang)
-        try:
-            translated = await get_llm_provider().summarize(prompt)
-        except Exception:
-            log.exception("Translation failed")
-            await msg.reply_text(
-                "Translation failed, but here is the original transcript:\n\n" + transcript[:3500]
-            )
-            return
-        await _send_long(update, translated)
-        return
-
     await context.bot.send_chat_action(msg.chat_id, ChatAction.TYPING)
-    prompt = build_summary_prompt(transcript, s.default_mode, s.default_output_lang)
     try:
-        summary = await get_llm_provider().summarize(prompt)
+        text = await transcript_to_reply(s, combined)
     except Exception:
         log.exception("LLM failed")
+        verb = "Translation" if s.default_mode == "transcript" else "Summary"
         await msg.reply_text(
-            "Summary failed, but here is the raw transcript:\n\n" + transcript[:3500]
+            f"{verb} failed, but here is the raw transcript:\n\n" + combined[:3500]
         )
         return
+    await _send_long(update, text)
 
-    await _send_long(update, summary)
+
+_batcher = Batcher(_flush_telegram)
 
 
 _DOWNLOAD_ATTEMPTS = 3
@@ -470,20 +407,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await msg.reply_text("I couldn't detect any speech in that message.")
         return
 
-    # Append to the per-chat batch and (re)schedule the flush.
-    chat_id = msg.chat_id
-    batch = _batches.get(chat_id)
-    if batch is None:
-        batch = _PendingBatch(settings=s)
-        _batches[chat_id] = batch
-
-    batch.transcripts.append(transcript)
-    batch.last_update = update
-    batch.settings = s  # user may have changed /mode or /lang between voices
-
-    if batch.flush_task and not batch.flush_task.done():
-        batch.flush_task.cancel()
-    batch.flush_task = asyncio.create_task(_flush_batch_after(chat_id, context))
+    _batcher.add(str(msg.chat_id), s, transcript, (update, context))
 
 
 # ---------- Global error handler ----------
