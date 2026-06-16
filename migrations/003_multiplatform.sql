@@ -18,8 +18,9 @@ UPDATE users
    AND telegram_id IS NOT NULL;
 
 -- telegram_id is no longer the primary key and is absent for WhatsApp rows.
-ALTER TABLE users ALTER COLUMN telegram_id DROP NOT NULL;
+-- Drop the primary key FIRST — Postgres won't let a PK column become nullable.
 ALTER TABLE users DROP CONSTRAINT IF EXISTS users_pkey;
+ALTER TABLE users ALTER COLUMN telegram_id DROP NOT NULL;
 
 ALTER TABLE users ALTER COLUMN platform    SET NOT NULL;
 ALTER TABLE users ALTER COLUMN external_id SET NOT NULL;
