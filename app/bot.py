@@ -37,6 +37,7 @@ from app.core import (
 )
 from app.prompts import build_error_explanation_prompt
 from app.providers.llm import get_llm_provider
+from app.providers.stt import get_stt_provider
 
 log = logging.getLogger(__name__)
 
