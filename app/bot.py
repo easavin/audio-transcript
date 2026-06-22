@@ -50,7 +50,7 @@ def help_text(is_admin: bool) -> str:
     lines = [
         "🎙️ *Voice Transcript Bot*",
         "",
-        "Forward me a voice or audio message and I'll transcribe or summarize it.",
+        "Forward me a voice, audio, or video message (including round video notes) and I'll transcribe or summarize it.",
         "",
         "*Modes:*",
         "• 📝 *Transcript* — full text (translated if you pick a language)",
@@ -379,17 +379,21 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _deny_and_show_id(update)
         return
 
-    voice = msg.voice or msg.audio
-    if not voice:
-        await msg.reply_text("Please send a voice or audio message.")
+    # Circle video notes and regular videos carry an audio track Whisper can
+    # transcribe directly; voice notes use .ogg, everything video-ish is .mp4.
+    media = msg.voice or msg.audio or msg.video_note or msg.video
+    if not media:
+        await msg.reply_text("Please send a voice, audio, or video message.")
         return
+
+    ext = "ogg" if (msg.voice or msg.audio) else "mp4"
 
     await context.bot.send_chat_action(msg.chat_id, ChatAction.TYPING)
 
     with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / f"audio-{voice.file_unique_id}.ogg"
+        path = Path(tmp) / f"audio-{media.file_unique_id}.{ext}"
         try:
-            await _download_voice(context, voice.file_id, path)
+            await _download_voice(context, media.file_id, path)
         except (TimedOut, NetworkError):
             log.exception("Telegram download failed")
             await msg.reply_text(
@@ -490,6 +494,11 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("revoke", cmd_revoke))
     app.add_handler(CommandHandler("users", cmd_users))
     app.add_handler(CallbackQueryHandler(on_callback))
-    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
+    app.add_handler(
+        MessageHandler(
+            filters.VOICE | filters.AUDIO | filters.VIDEO_NOTE | filters.VIDEO,
+            on_voice,
+        )
+    )
     app.add_error_handler(on_error)
     return app
