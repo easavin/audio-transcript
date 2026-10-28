@@ -7,6 +7,7 @@ Requires-Dist: python-telegram-bot[webhooks]<22,>=21.11
 Requires-Dist: fastapi>=0.115.0
 Requires-Dist: uvicorn[standard]>=0.30.0
 Requires-Dist: groq>=0.15.0
+Requires-Dist: anthropic>=2.3.0
 Requires-Dist: google-genai>=0.8.0
 Requires-Dist: asyncpg>=0.30.0
 Requires-Dist: pydantic-settings>=2.7.0

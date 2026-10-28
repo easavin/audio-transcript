@@ -30,7 +30,7 @@ def _configure_logging() -> None:
     root.handlers = [stdout_handler, stderr_handler]
 
     # Quiet noisy libraries — only surface their warnings/errors.
-    for name in ("httpx", "httpcore", "google_genai", "telegram.ext.Updater"):
+    for name in ("httpx", "httpx2", "httpcore", "google_genai", "telegram.ext.Updater"):
         logging.getLogger(name).setLevel(logging.WARNING)
 
 

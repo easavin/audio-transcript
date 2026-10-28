@@ -16,7 +16,8 @@ class Settings(BaseSettings):
     stt_provider: Literal["groq", "local_whisper"] = "groq"
     groq_api_key: str = ""
 
-    llm_provider: Literal["gemini", "ollama"] = "gemini"
+    llm_provider: Literal["anthropic", "gemini", "ollama"] = "anthropic"
+    anthropic_api_key: str = ""
     gemini_api_key: str = ""
 
     ollama_base_url: str = "http://localhost:11434"

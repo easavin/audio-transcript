@@ -31,7 +31,11 @@ _MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
 
 async def init_pool() -> None:
     global _pool
-    _pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=5)
+    # min_size=0 so the pool drains to zero when idle and Neon can scale to zero.
+    # Since asyncpg 0.32, min_size is a maintained floor: any idle connection is
+    # kept open and re-opened as soon as Neon suspends and drops it, which wakes
+    # the compute again ~1s later and keeps it running 24/7.
+    _pool = await asyncpg.create_pool(settings.database_url, min_size=0, max_size=5)
     await _run_migrations()
     await _seed_admins()
 
