@@ -46,7 +46,7 @@ async def _startup() -> None:
             allowed_updates=_TELEGRAM_UPDATES,
             drop_pending_updates=False,
         )
-        log.info("Telegram webhook set: %s", url)
+        log.info("Telegram webhook set: %s/telegram/<secret>", settings.telegram_webhook_base.rstrip("/"))
     else:
         await ptb_app.updater.start_polling(allowed_updates=_TELEGRAM_UPDATES)
         log.info("Telegram polling started (no webhook base configured)")
