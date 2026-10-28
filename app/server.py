@@ -4,8 +4,8 @@
   GET  /whatsapp           -> Meta webhook verification handshake
   POST /whatsapp           -> WhatsApp Cloud API events
 
-The Telegram Application is initialized/started in the lifespan and driven by
-process_update() rather than its own web server, so both platforms share one
+The Telegram Application is initialized/started in the lifespan and fed through
+its update_queue rather than its own web server, so both platforms share one
 event loop, one DB pool, and one Railway service.
 """
 
@@ -89,9 +89,12 @@ async def telegram_webhook(secret: str, request: Request) -> Response:
     if not hmac.compare_digest(header, settings.telegram_webhook_secret):
         return Response(status_code=403)
 
+    # Queue it and answer 200 right away: handling a voice (download + STT) can
+    # outlast Telegram's webhook timeout, which would make Telegram re-send the
+    # update and the user get duplicate replies. The Application started in
+    # _startup() processes the queue in the background, one update at a time.
     data = await request.json()
-    update = Update.de_json(data, ptb_app.bot)
-    await ptb_app.process_update(update)
+    await ptb_app.update_queue.put(Update.de_json(data, ptb_app.bot))
     return Response(status_code=200)
 
 
